@@ -25,13 +25,25 @@ export default async function handler(req, res) {
     if (!GROQ_KEY) { res.status(500).json({ error: 'Server not configured' }); return; }
 
     // Groq retires vision models from time to time (llama-4-scout died 2026-07),
-    // so try candidates in order until one answers.
-    const CANDIDATE_MODELS = [
+    // so ask Groq which models exist RIGHT NOW and pick the vision-capable ones,
+    // with the old known names as a safety net.
+    let CANDIDATE_MODELS = [];
+    try {
+      const ml = await fetch('https://api.groq.com/openai/v1/models', {
+        headers: { 'Authorization': `Bearer ${GROQ_KEY}` },
+      });
+      if (ml.ok) {
+        const list = (await ml.json()).data || [];
+        CANDIDATE_MODELS = list
+          .map((m) => m.id)
+          .filter((id) => /scout|maverick|vision|llava|-vl-|vl\b/i.test(id))
+          .sort((a, b) => (b.includes('maverick') ? 1 : 0) - (a.includes('maverick') ? 1 : 0));
+      }
+    } catch (_) {}
+    CANDIDATE_MODELS = CANDIDATE_MODELS.concat([
       'meta-llama/llama-4-maverick-17b-128e-instruct',
       'meta-llama/llama-4-scout-17b-16e-instruct',
-      'llama-3.2-90b-vision-preview',
-      'llama-3.2-11b-vision-preview',
-    ];
+    ]).filter((v, i, a) => a.indexOf(v) === i);
 
     const askModel = (model) => fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
