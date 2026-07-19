@@ -81,7 +81,12 @@ export default async function handler(req, res) {
           'Content-Type': 'application/json',
           'Prefer': 'return=representation'
         },
-        body: JSON.stringify({ plan: plan })
+        body: JSON.stringify({
+          plan: plan,
+          // Monthly validity window — shown as "valid from/until" on web + app.
+          plan_since: new Date().toISOString(),
+          plan_until: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+        })
       });
 
       if (supaRes.ok) {
