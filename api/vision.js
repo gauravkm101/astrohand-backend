@@ -24,15 +24,23 @@ export default async function handler(req, res) {
     const GROQ_KEY = process.env.GROQ_API_KEY;
     if (!GROQ_KEY) { res.status(500).json({ error: 'Server not configured' }); return; }
 
-    // Groq vision-capable model. If this model name ever changes, update it here.
-    const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    // Groq retires vision models from time to time (llama-4-scout died 2026-07),
+    // so try candidates in order until one answers.
+    const CANDIDATE_MODELS = [
+      'meta-llama/llama-4-maverick-17b-128e-instruct',
+      'meta-llama/llama-4-scout-17b-16e-instruct',
+      'llama-3.2-90b-vision-preview',
+      'llama-3.2-11b-vision-preview',
+    ];
+
+    const askModel = (model) => fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${GROQ_KEY}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        model,
         max_tokens: 20,
         temperature: 0,
         messages: [
@@ -53,9 +61,20 @@ export default async function handler(req, res) {
       }),
     });
 
-    if (!groqRes.ok) {
-      const errText = await groqRes.text().catch(() => '');
-      res.status(502).json({ error: 'Vision service error', detail: errText.slice(0, 200) });
+    let groqRes = null, lastErr = '';
+    for (const model of CANDIDATE_MODELS) {
+      const attempt = await askModel(model);
+      if (attempt.ok) { groqRes = attempt; break; }
+      lastErr = await attempt.text().catch(() => '');
+      // Only fall through to the next model when this one is missing/unavailable.
+      if (!/model_not_found|does not exist|decommissioned/i.test(lastErr)) {
+        res.status(502).json({ error: 'Vision service error', detail: lastErr.slice(0, 200) });
+        return;
+      }
+    }
+
+    if (!groqRes) {
+      res.status(502).json({ error: 'Vision service error', detail: ('No available vision model. ' + lastErr).slice(0, 200) });
       return;
     }
 
