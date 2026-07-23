@@ -39,7 +39,7 @@ export default async function handler(req, res) {
       + 'for anything else (the back of a hand, a single finger, an animal, an object, a face, '
       + 'scenery, or an unclear image).';
 
-    const MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash'];
+    const MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
     const ask = (model) => fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
         method: 'POST',
@@ -55,8 +55,9 @@ export default async function handler(req, res) {
       const attempt = await ask(model);
       if (attempt.ok) { gRes = attempt; break; }
       lastErr = await attempt.text().catch(() => '');
-      // fall through to the next model only if THIS model is missing/unsupported
-      if (!/not.?found|does not exist|not supported|unavailable|is not found/i.test(lastErr)) {
+      // fall through to the next model if THIS one is missing/unsupported OR is
+      // quota/rate-limited (429) — a different model may have free quota left.
+      if (!/not.?found|does not exist|not supported|unavailable|is not found|quota|rate.?limit|RESOURCE_EXHAUSTED|"code":\s*429/i.test(lastErr)) {
         res.status(502).json({ error: 'Vision service error', detail: lastErr.slice(0, 200) });
         return;
       }
