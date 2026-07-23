@@ -39,7 +39,7 @@ export default async function handler(req, res) {
       + 'for anything else (the back of a hand, a single finger, an animal, an object, a face, '
       + 'scenery, or an unclear image).';
 
-    const MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
+    const MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite'];
     const ask = (model) => fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
         method: 'POST',
