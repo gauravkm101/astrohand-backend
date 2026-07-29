@@ -7,7 +7,10 @@ const Razorpay = require('razorpay');
 const PLAN_PRICES_INR = {
   silver: 499,
   gold: 999,
-  vip: 1999
+  vip: 1999,
+  // One-time purchase (not a subscription): unlocks a single full Kundli report
+  // (detailed reading + PDF). Handled specially in verify-payment.js.
+  report: 99
 };
 
 // Must stay in sync with the COUPONS table in index.html (frontend shows the
