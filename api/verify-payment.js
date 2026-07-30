@@ -70,26 +70,50 @@ export default async function handler(req, res) {
     let applied = false;
 
     if (serviceKey) {
+      // A paid customer must NEVER be left without what they bought. A profile row
+      // can legitimately be missing (e.g. the buyer signed up but their row was
+      // never created because they had no verified session yet), so resolve the id
+      // and self-heal the row before applying the purchase.
+      let uid = userId;
+      if (!uid && email) {
+        const look = await fetch(SUPABASE_URL + '/rest/v1/profiles?email=eq.' + encodeURIComponent(email) + '&select=id', { headers: svcHeaders });
+        if (look.ok) { const rows = await look.json(); uid = (Array.isArray(rows) && rows[0]) ? rows[0].id : ''; }
+      }
+      if (uid) {
+        const chk = await fetch(SUPABASE_URL + '/rest/v1/profiles?id=eq.' + encodeURIComponent(uid) + '&select=id', { headers: svcHeaders });
+        const chkRows = chk.ok ? await chk.json() : [];
+        if (!Array.isArray(chkRows) || chkRows.length === 0) {
+          // Service role bypasses RLS, so this succeeds even with no user session.
+          const ins = await fetch(SUPABASE_URL + '/rest/v1/profiles', {
+            method: 'POST',
+            headers: { ...svcHeaders, 'Prefer': 'resolution=merge-duplicates' },
+            body: JSON.stringify({ id: uid, email: email || null, plan: 'free', joined_at: new Date().toISOString() })
+          });
+          console.log('Self-healed missing profile for paying customer:', uid, ins.status);
+        }
+      }
+
       if (isReport) {
         // One-time ₹99 report: grant ONE report credit — never touches the plan.
-        // grant_report_credit(uuid) needs the profile id, so resolve it first.
-        let uid = userId;
-        if (!uid) {
-          const look = await fetch(SUPABASE_URL + '/rest/v1/profiles?email=eq.' + encodeURIComponent(email) + '&select=id', { headers: svcHeaders });
-          if (look.ok) { const rows = await look.json(); uid = (Array.isArray(rows) && rows[0]) ? rows[0].id : ''; }
-        }
         if (uid) {
           const rpc = await fetch(SUPABASE_URL + '/rest/v1/rpc/grant_report_credit', {
             method: 'POST', headers: svcHeaders, body: JSON.stringify({ uid })
           });
-          applied = rpc.ok;
-          if (!rpc.ok) console.error('grant_report_credit failed:', rpc.status, await rpc.text());
+          if (rpc.ok) {
+            // The function returns the NEW credit balance; 0 means no row was
+            // updated, so a 200 alone must not be treated as success.
+            const newBal = Number(await rpc.text());
+            applied = Number.isFinite(newBal) && newBal > 0;
+            if (!applied) console.error('grant_report_credit matched no profile row:', { email, userId, uid });
+          } else {
+            console.error('grant_report_credit failed:', rpc.status, await rpc.text());
+          }
         } else {
           console.error('Report payment verified but no profile matched:', { email, userId });
         }
       } else {
         // Subscription: set the plan + a 30-day validity window.
-        const filter = userId ? 'id=eq.' + encodeURIComponent(userId) : 'email=eq.' + encodeURIComponent(email);
+        const filter = uid ? 'id=eq.' + encodeURIComponent(uid) : 'email=eq.' + encodeURIComponent(email);
         const supaRes = await fetch(SUPABASE_URL + '/rest/v1/profiles?' + filter, {
           method: 'PATCH',
           headers: { ...svcHeaders, 'Prefer': 'return=representation' },
