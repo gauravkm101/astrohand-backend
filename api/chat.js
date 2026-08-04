@@ -127,7 +127,22 @@ export default async function handler(req, res) {
     // 'length' means the model ran out of room and the text stops mid-sentence.
     // Callers translate long readings in chunks and need to know, rather than
     // quietly showing a half-finished result.
-    return res.status(200).json({ text, truncated: choice?.finish_reason === 'length' });
+    //
+    // `usage` is passed through so the cost of a feature can actually be
+    // measured instead of guessed — the provider bills per token and the free
+    // tier is capped per day, so knowing what one Kundli costs decides when a
+    // paid plan is needed.
+    return res.status(200).json({
+      text,
+      truncated: choice?.finish_reason === 'length',
+      usage: data.usage
+        ? {
+            in: data.usage.prompt_tokens,
+            out: data.usage.completion_tokens,
+            total: data.usage.total_tokens,
+          }
+        : undefined,
+    });
 
   } catch (error) {
     console.error('Server error:', error);
