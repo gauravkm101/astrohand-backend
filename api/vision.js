@@ -39,7 +39,16 @@ export default async function handler(req, res) {
       + 'for anything else (the back of a hand, a single finger, an animal, an object, a face, '
       + 'scenery, or an unclear image).';
 
-    const MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite'];
+    // Newest first. This list had gone stale: gemini-2.5-flash is no longer
+    // served to new keys at all, and the 2.0 pair were out of quota, so every
+    // palm photo fell through to "no available vision model" and the app
+    // silently used its local skin-and-detail heuristic instead of looking at
+    // the picture. The free quota is per model, so listing more of the family
+    // is also what keeps this working through a day.
+    const MODELS = [
+      'gemini-flash-latest', 'gemini-3.5-flash', 'gemini-flash-lite-latest',
+      'gemini-3.1-flash-lite', 'gemini-2.0-flash', 'gemini-2.0-flash-lite',
+    ];
     const ask = (model) => fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
         method: 'POST',
