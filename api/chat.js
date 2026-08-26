@@ -12,6 +12,32 @@ const RATE_LIMIT = 150; // max requests per IP per day
 // Simple in-memory rate limiter (resets when serverless function restarts)
 const rateLimitMap = new Map();
 
+/* ── Circuit breaker + last-known-good ────────────────────────────────────────
+   Free tiers do not fail randomly, they fail for the rest of the day: Groq runs
+   out of tokens, and Gemini's allowance is per-model per-day. So the same
+   provider that just refused will almost certainly refuse the next caller too —
+   and probing it again costs that caller real seconds. Measured 2026-08-23,
+   after the timeout fix: Groq failed 10 out of 10 times yet was still tried on
+   every request, and roughly 2 in 10 requests walked the whole Gemini list
+   because the model that usually answers had hit its daily quota. Those were
+   the 16-17s responses.
+
+   So a provider that fails is put aside for COOL_MS and skipped, and the model
+   that last worked is tried first next time. Both facts live in module scope,
+   which on Vercel survives between invocations on a warm instance and is lost
+   when it recycles — exactly like rateLimitMap above. That is fine: this is an
+   optimisation, never a gate. If everything is cooling we ignore the cooldowns
+   and try anyway, so a stale note can cost a slow request but can never cost a
+   reading. And because a cooldown expires on its own, the day Groq's quota
+   resets it simply starts winning again — no deploy needed. */
+const COOL_MS = 10 * 60 * 1000;
+const coolUntil = new Map();
+let lastGoodGemini = null;
+
+const isCool = (k) => (coolUntil.get(k) || 0) > Date.now();
+const markCool = (k) => coolUntil.set(k, Date.now() + COOL_MS);
+const markGood = (k) => coolUntil.delete(k);
+
 function checkRateLimit(ip) {
   const now = Date.now();
   const dayMs = 24 * 60 * 60 * 1000;
@@ -111,8 +137,12 @@ export default async function handler(req, res) {
      starting new attempts once the overall budget is gone. A caller then gets a
      real 429 with a message the app already knows how to show, instead of a 504
      with no body at all. */
-  const BUDGET_MS = 25000;   // stay under vercel.json maxDuration (30s)
-  const PER_CALL_MS = 9000;  // any single provider that goes quiet is abandoned
+  const BUDGET_MS = 25000;    // stay under vercel.json maxDuration (30s)
+  const PER_CALL_MS = 9000;   // any single provider that goes quiet is abandoned
+  // Groq gets a shorter leash than Gemini. It is only ever a probe now: when it
+  // has quota it answers well under this, and when it does not, the caller
+  // should not pay nine seconds to find that out.
+  const GROQ_MS = 4000;
   const startedAt = Date.now();
   const msLeft = () => BUDGET_MS - (Date.now() - startedAt);
 
@@ -124,6 +154,7 @@ export default async function handler(req, res) {
 
   async function viaGroq() {
     if (!GROQ_KEY) throw Object.assign(new Error('Groq not configured'), { skip: true });
+    if (isCool('groq')) throw Object.assign(new Error('Groq cooling off'), { skip: true });
     const r = await timeoutFetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + GROQ_KEY },
@@ -136,7 +167,7 @@ export default async function handler(req, res) {
         temperature: temp,
         top_p: 0.95,
       }),
-    }, PER_CALL_MS);
+    }, GROQ_MS);
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
       throw Object.assign(new Error(e.error?.message || `Groq HTTP ${r.status}`), { status: r.status });
@@ -145,6 +176,7 @@ export default async function handler(req, res) {
     const c = d.choices?.[0];
     const text = c?.message?.content || '';
     if (!text) throw new Error('Groq returned nothing');
+    markGood('groq');
     return {
       text,
       truncated: c.finish_reason === 'length',
@@ -171,8 +203,16 @@ export default async function handler(req, res) {
 
   async function viaGemini() {
     if (!GEMINI_KEY) throw Object.assign(new Error('Gemini not configured'), { skip: true });
+    // Whatever answered last time goes first; then the static order.
+    const ordered = [...new Set([lastGoodGemini, ...GEMINI_MODELS].filter(Boolean))];
+    // Skip models known to be out of quota — unless that would skip everything,
+    // in which case the notes are stale or the whole family is spent and we
+    // should still try rather than refuse.
+    const warm = ordered.filter((m) => !isCool(`gem:${m}`));
+    const candidates = warm.length ? warm : ordered;
+
     let last = 'no model answered';
-    for (const model of GEMINI_MODELS) {
+    for (const model of candidates) {
       if (msLeft() <= 1500) { last = `${last} (budget spent)`; break; }
       let r, d;
       // Per-model try/catch: one model that hangs and gets aborted must not
@@ -195,7 +235,13 @@ export default async function handler(req, res) {
           },
           PER_CALL_MS
         );
-        if (r.status === 429 || r.status === 404) { last = `${model} unavailable (${r.status})`; continue; }
+        // 429 = daily allowance gone, 404 = the name no longer exists. Neither
+        // resolves within this request, so stop asking for a while.
+        if (r.status === 429 || r.status === 404) {
+          markCool(`gem:${model}`);
+          last = `${model} unavailable (${r.status})`;
+          continue;
+        }
         if (!r.ok) { last = `${model} HTTP ${r.status}`; continue; }
         d = await r.json();
       } catch (e) {
@@ -206,6 +252,8 @@ export default async function handler(req, res) {
       const c = d.candidates?.[0];
       const text = c?.content?.parts?.map((p) => p.text).join('') || '';
       if (!text.trim()) { last = `${model} returned nothing`; continue; }
+      markGood(`gem:${model}`);
+      lastGoodGemini = model;
       return {
         text,
         truncated: c.finishReason === 'MAX_TOKENS',
@@ -228,7 +276,15 @@ export default async function handler(req, res) {
       return res.status(200).json(await provider());
     } catch (e) {
       failures.push(e.message);
-      if (!e.skip) console.error('Provider failed:', e.message);
+      // `skip` means we never actually called it (not configured, or already
+      // cooling), so it says nothing about the provider's health.
+      if (!e.skip) {
+        // Only Groq is cooled as a whole. Gemini tracks its own models
+        // individually inside viaGemini, because one model being out of quota
+        // says nothing about the rest of the family.
+        if (provider === viaGroq) markCool('groq');
+        console.error('Provider failed:', e.message);
+      }
     }
   }
 
