@@ -49,37 +49,50 @@ export default async function handler(req, res) {
       'gemini-flash-latest', 'gemini-3.5-flash', 'gemini-flash-lite-latest',
       'gemini-3.1-flash-lite', 'gemini-2.0-flash', 'gemini-2.0-flash-lite',
     ];
+    // maxOutputTokens was 20. The newer Gemini models think before they answer
+    // and the thinking counts against that limit, so the reply came back with no
+    // text at all — and an empty answer was read as "not a palm". Every photo,
+    // a real palm included, was rejected (2026-09-24: {"isPalm":false,"answer":""}
+    // for any image). Give the answer room, and treat an empty one as "this model
+    // did not answer", never as a verdict.
     const ask = (model) => fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': KEY },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: b64 } }] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 20 },
+          generationConfig: { temperature: 0, maxOutputTokens: 1024 },
         }),
       });
 
-    let gRes = null, lastErr = '';
+    const textOf = (data) => (data?.candidates?.[0]?.content?.parts || [])
+      .map((p) => p.text || '').join(' ').trim().toUpperCase();
+
+    let lastErr = '';
     for (const model of MODELS) {
       const attempt = await ask(model);
-      if (attempt.ok) { gRes = attempt; break; }
-      lastErr = await attempt.text().catch(() => '');
-      // fall through to the next model if THIS one is missing/unsupported OR is
-      // quota/rate-limited (429) — a different model may have free quota left.
-      if (!/not.?found|does not exist|not supported|unavailable|is not found|quota|rate.?limit|RESOURCE_EXHAUSTED|"code":\s*429/i.test(lastErr)) {
-        res.status(502).json({ error: 'Vision service error', detail: lastErr.slice(0, 200) });
-        return;
+      if (!attempt.ok) {
+        lastErr = await attempt.text().catch(() => '');
+        // fall through to the next model if THIS one is missing/unsupported OR is
+        // quota/rate-limited (429) — a different model may have free quota left.
+        if (!/not.?found|does not exist|not supported|unavailable|is not found|quota|rate.?limit|RESOURCE_EXHAUSTED|"code":\s*429/i.test(lastErr)) {
+          res.status(502).json({ error: 'Vision service error', detail: lastErr.slice(0, 200) });
+          return;
+        }
+        continue;
       }
-    }
-    if (!gRes) {
-      res.status(502).json({ error: 'Vision service error', detail: ('No available vision model. ' + lastErr).slice(0, 200) });
+      const data = await attempt.json();
+      const answer = textOf(data);
+      if (!/\b(PALM|NO)\b/.test(answer)) {
+        lastErr = `${model}: no verdict (${data?.candidates?.[0]?.finishReason || 'no candidate'})`;
+        continue;
+      }
+      res.status(200).json({ isPalm: /\bPALM\b/.test(answer), answer, model });
       return;
     }
-
-    const data = await gRes.json();
-    const answer = (data?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim().toUpperCase();
-    const isPalm = answer.includes('PALM');
-    res.status(200).json({ isPalm, answer });
+    // No model gave a verdict: a 502 lets the app and site fall back to their
+    // local check instead of wrongly telling the user it is not a palm.
+    res.status(502).json({ error: 'Vision service error', detail: ('No vision model gave a verdict. ' + lastErr).slice(0, 200) });
   } catch (err) {
     res.status(500).json({ error: 'Server error', detail: String(err).slice(0, 200) });
   }
