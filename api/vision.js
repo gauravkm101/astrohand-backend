@@ -33,11 +33,15 @@ export default async function handler(req, res) {
     const m = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/s.exec(imageBase64);
     if (m) { mime = m[1]; b64 = m[2]; }
 
-    const prompt = 'Look at this image. Is it a clear photo of the INSIDE of a human hand '
-      + '(the palm side, showing palm lines/creases), suitable for palmistry? Answer with ONLY '
-      + 'one word: "PALM" if it clearly shows a human palm (inside of hand with lines), or "NO" '
-      + 'for anything else (the back of a hand, a single finger, an animal, an object, a face, '
-      + 'scenery, or an unclear image).';
+    // The reading is worked out from birth details, so this only has to confirm
+    // the photo shows the palm SIDE of a hand. The old wording asked for clear
+    // lines and turned away a real palm decorated with mehndi (2026-09-24).
+    const prompt = 'Look at this image. Does it show the INSIDE of a human hand — the palm side, '
+      + 'not the back of the hand? Mehndi/henna, jewellery, faint lines or ordinary lighting are '
+      + 'fine as long as the palm side is what the photo shows. Answer with ONLY one word: "PALM" '
+      + 'if the palm side of a human hand is clearly visible, or "NO" for anything else (the back '
+      + 'of a hand, only a finger or fist, an animal, an object, a face, scenery, or an image too '
+      + 'blurred or dark to tell).';
 
     // Newest first. This list had gone stale: gemini-2.5-flash is no longer
     // served to new keys at all, and the 2.0 pair were out of quota, so every
